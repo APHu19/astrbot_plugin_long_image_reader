@@ -1,5 +1,7 @@
 # 长图切分识图（astrbot_plugin_long_image_reader）
 
+> **本插件的全部代码与文档由 DSH（DeepSeek Harness）生成完成。**
+
 ## 安装
 
 把整个目录放进 AstrBot 的 `data/plugins/`，重启 AstrBot 即可，不需要额外依赖（只用 Pillow）。
