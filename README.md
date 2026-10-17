@@ -1,5 +1,14 @@
 # 长图切分识图（astrbot_plugin_long_image_reader）
 
+## 安装
+
+把整个目录放进 AstrBot 的 `data/plugins/`，重启 AstrBot 即可，不需要额外依赖（只用 Pillow）。
+
+```bash
+cd AstrBot/data/plugins
+git clone https://github.com/APHu19/astrbot_plugin_long_image_reader.git
+```
+
 ## 它解决什么问题
 
 AstrBot 的 AI 配置页有「启用图片压缩」，下面还有一项「最大边长」（默认 1280）。
