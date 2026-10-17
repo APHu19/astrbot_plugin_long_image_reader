@@ -1,0 +1,141 @@
+{
+  "enable": {
+    "type": "bool",
+    "description": "启用长图切分识图",
+    "default": true,
+    "hint": "关闭后工具直接返回「已关闭」，也不会向模型注入提示。"
+  },
+  "hint_enabled": {
+    "type": "bool",
+    "description": "向模型提示可以切分长图",
+    "default": true,
+    "hint": "仅在检测到长图时追加一行系统提示，让模型自己决定是否调用工具。"
+  },
+  "max_side_override": {
+    "type": "int",
+    "description": "单片最大边长（0 = 跟随框架的图片压缩最大边长）",
+    "default": 0,
+    "hint": "切片的最长边不会超过这个值。0 表示读取 AI 配置页「启用图片压缩」下的最大边长；填写时至少 256。"
+  },
+  "slice_threshold": {
+    "type": "int",
+    "description": "触发切分的图片边长阈值（0 = 与单片最大边长相同）",
+    "default": 0,
+    "hint": "图片最长边超过这个值才考虑切分。"
+  },
+  "min_aspect_ratio": {
+    "type": "float",
+    "description": "最小长宽比（长边 ÷ 短边，0 = 不限制）",
+    "default": 1.5,
+    "hint": "低于这个比例的正方形大图一般不缺信息，不切分。"
+  },
+  "max_slices": {
+    "type": "int",
+    "description": "片数上限",
+    "default": 64,
+    "hint": "切分后超过这个片数就整张放弃处理并向模型说明，不做降采样也不截断。"
+  },
+  "two_stage_enabled": {
+    "type": "bool",
+    "description": "两段式识别（插件先逐片转文字再汇总）",
+    "default": false,
+    "hint": "关闭时切片直接交给当前模型逐片阅读；开启后由插件调用识图模型逐片转写并汇总，当前模型只看汇总文字。适合当前模型不支持图片输入的情况。"
+  },
+  "vision_provider_id": {
+    "type": "string",
+    "description": "两段式的识图模型（留空 = 当前对话模型）",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "只在开启两段式识别时生效。",
+    "condition": {
+      "two_stage_enabled": true
+    }
+  },
+  "summary_provider_id": {
+    "type": "string",
+    "description": "两段式的汇总模型（留空 = 跟随识图模型）",
+    "default": "",
+    "_special": "select_provider",
+    "hint": "只在开启两段式识别时生效。",
+    "condition": {
+      "two_stage_enabled": true
+    }
+  },
+  "vision_concurrency": {
+    "type": "int",
+    "description": "两段式逐片识别的并发数",
+    "default": 4,
+    "hint": "调高可以更快，但更容易触发上游限流。",
+    "condition": {
+      "two_stage_enabled": true
+    }
+  },
+  "vision_timeout": {
+    "type": "int",
+    "description": "两段式单次模型调用超时（秒）",
+    "default": 90,
+    "hint": "超过这个时间视为该片识别失败。注意框架的工具调用默认只有 120 秒总时长。",
+    "condition": {
+      "two_stage_enabled": true
+    }
+  },
+  "vision_total_budget": {
+    "type": "int",
+    "description": "两段式逐片识别的总时长预算（秒）",
+    "default": 100,
+    "hint": "超过预算还没识完的片直接标记为超时，保证工具调用不被框架的 120 秒上限掐断。",
+    "condition": {
+      "two_stage_enabled": true
+    }
+  },
+  "slice_prompt": {
+    "type": "text",
+    "description": "两段式的逐片识别提示词（{index} 与 {total} 会被替换）",
+    "default": "这是一张超长图片按从上到下顺序切分后的第 {index}/{total} 片。请逐字转写你在图中看到的全部文字，保留原有的分段与列表层级。界面元素、图表、图片内容用一句括号说明即可。不要总结，不要省略，不要补写没看到的内容。",
+    "hint": "留空则使用内置默认提示词。",
+    "condition": {
+      "two_stage_enabled": true
+    }
+  },
+  "summary_prompt": {
+    "type": "text",
+    "description": "两段式的汇总提示词（{focus}、{parts}、{total} 会被替换）",
+    "default": "用户的原问题或关注点：{focus}\n\n下面是一张超长图片按从上到下顺序切分成的 {total} 片，以及每片各自的识别结果：\n\n{parts}\n\n请把这些结果合并成一份连续、去重、不丢信息的识图结果，保留关键文字、数字、时间、名称与结构；无法辨认处标注「无法辨认」。",
+    "hint": "留空则使用内置默认提示词。",
+    "condition": {
+      "two_stage_enabled": true
+    }
+  },
+  "uniform_stddev_threshold": {
+    "type": "float",
+    "description": "纯色行判定阈值（灰度标准差）",
+    "default": 3.0,
+    "hint": "越小越严格。判定为纯色的行才允许当切分点，切缝不会切断文字。"
+  },
+  "overlap_ratio": {
+    "type": "float",
+    "description": "相邻切片的重复比例",
+    "default": 0.02,
+    "hint": "避免切缝正好压在一行字上导致两头都缺半个字。0 表示不重叠。"
+  },
+  "max_scan_width": {
+    "type": "int",
+    "description": "判定纯色行时的扫描宽度",
+    "default": 256,
+    "hint": "只影响切点计算，不影响切片清晰度。调大更准但更慢。"
+  },
+  "output_format": {
+    "type": "string",
+    "description": "切片格式",
+    "default": "jpeg",
+    "options": ["jpeg", "png"],
+    "hint": "jpeg 体积小适合照片截图，png 适合带透明或纯文字的界面截图。"
+  },
+  "temp_file_policy": {
+    "type": "string",
+    "description": "临时文件处理",
+    "default": "keep",
+    "options": ["keep", "delete", "delete_after_24h"],
+    "hint": "keep 全部保留在 data/temp/long_image/<日期>/；delete 本次用完立即删除；delete_after_24h 每次运行时清掉 24 小时前的旧目录。"
+  }
+}

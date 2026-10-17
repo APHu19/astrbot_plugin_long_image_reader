@@ -1,0 +1,8 @@
+name: astrbot_plugin_long_image_reader
+display_name: 长图切分识图
+desc: 把超长图片按纯色/边框行切成清晰片段再交给模型阅读，绕开「启用图片压缩」把长图压成一条细线导致的细节丢失。
+version: 1.0.0
+author: APHu19
+repo: ""
+support_platforms:
+  - aiocqhttp
