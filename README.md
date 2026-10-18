@@ -24,7 +24,8 @@ working_img.thumbnail((max_size, max_size), PILImage.Resampling.LANCZOS)
 截图越完整，信息丢得越干净。
 
 本插件不碰框架的压缩设置，而是在模型自己认为需要读长图时，把**原图**重新按
-「纯色 / 边框行」切成若干段，每段最长边不超过 1280，再交给模型逐段阅读。
+「纯色 / 边框行」切成若干段，每段最长边不超过 1280，交给识图模型逐段转成文字，
+再把文字结果交回对话模型。
 
 ## 怎么触发
 
@@ -33,10 +34,25 @@ working_img.thumbnail((max_size, max_size), PILImage.Resampling.LANCZOS)
 1. 插件挂了 `on_llm_request`。当本条消息的图片实测是长图（超过阈值 + 长宽比达标）时，
    往 system prompt 追加一行提示，告诉模型「图被压过了，要准确读字请调 `read_long_image`」。
 2. 模型自己决定是否调用。调用才会切片。
-3. 切片走的是工具返回图片的通道（`ImageContent` → `tool_image_cache`），
+3. 切片由插件直接送给识图模型（`provider.text_chat(image_urls=[...])`），
    **这条路不经过 `prepare_model_image`，切片不会被二次压缩。**
 
 普通图片、没调工具的情况，插件完全不介入。
+
+## 为什么要用识图模型而不是把图塞回对话
+
+早期版本把切片以 `ImageContent` 返回给工具调用方，让对话模型自己看。实测有两个问题：
+
+- 框架在 `tool_loop_agent_runner.py:1054-1087` 把工具返回的图拼进上下文时**不切换 provider**，
+  永远交给当前对话模型。对话模型不支持图片输入（`modalities` 不含 `image`）时，
+  这些图还会被 `sanitize_contexts_by_modalities` 替换成 `[Image]` 占位文本，
+  模型就只能跳过识图直接编。
+- 每张切片以 `data:image/jpeg;base64,...` 内联进上下文，单片 200–400KB，十片就是几 MB。
+  上下文被顶爆后触发压缩，历史被替换成摘要 —— 表现就是「文本被压缩」，
+  而且模型一次能看的图数量会肉眼可见地变少。
+
+所以现在默认走「识图模型转文字」：对话模型只收到一段文字，上下文占用从几 MB 降到几千字符。
+
 
 ## 切分算法
 
@@ -59,10 +75,13 @@ working_img.thumbnail((max_size, max_size), PILImage.Resampling.LANCZOS)
 
 | 模式 | 行为 | 适用 |
 | --- | --- | --- |
-| 默认（`two_stage_enabled: false`） | 切片以图片形式直接返回，当前模型一次看到全部片段 | 当前模型支持图片输入 |
-| 两段式（`two_stage_enabled: true`） | 插件调识图模型逐片转文字，再调汇总模型合并，只把文字返回当前模型 | 当前模型不支持图片，或想省主模型上下文 |
+| 默认（`two_stage_enabled: true`） | 插件调识图模型逐片转文字，再调汇总模型合并，只把文字返回当前模型 | 几乎所有情况 |
+| 直传（`two_stage_enabled: false`） | 切片以图片形式返回，当前模型一次看到前 `direct_max_images` 片 | 当前模型支持图片，且片数不多 |
 
-两段式的并发数、超时、两段提示词都可配置。
+两段式的并发数、超时、两段提示词都可配置。识图模型留空时会自动挑一个 `modalities` 含 `image`
+的已启用模型；都挑不到就明确报错，不会把图硬塞给文本模型。
+
+汇总结果过长时会按 `summary_chunk_chars` 分段汇总再合并一次，避免汇总请求自己撑爆上下文。
 
 ## 配置项
 
@@ -74,9 +93,11 @@ working_img.thumbnail((max_size, max_size), PILImage.Resampling.LANCZOS)
 | `slice_threshold` | 0 | 触发切分的边长阈值，0 = 与单片最大边长相同 |
 | `min_aspect_ratio` | 1.5 | 长宽比门槛，正方形大图不切 |
 | `max_slices` | 64 | 片数上限，超出整张放弃并告知模型 |
-| `two_stage_enabled` | 关 | 两段式识别 |
-| `vision_provider_id` | 空 | 两段式识图模型，空 = 当前模型 |
-| `summary_provider_id` | 空 | 两段式汇总模型，空 = 跟随识图模型 |
+| `two_stage_enabled` | **开** | 两段式识别 |
+| `vision_provider_id` | 空 | 识图模型，空 = 自动选第一个支持图片的模型 |
+| `summary_provider_id` | 空 | 汇总模型，空 = 当前对话模型 |
+| `summary_chunk_chars` | 12000 | 汇总分段长度 |
+| `direct_max_images` | 6 | 直传模式最多回传几张 |
 | `vision_concurrency` | 4 | 两段式并发数 |
 | `vision_timeout` | 90 | 两段式单次调用超时（秒） |
 | `vision_total_budget` | 100 | 两段式逐片识别总预算（秒），超出的片标记为超时 |
@@ -91,9 +112,7 @@ working_img.thumbnail((max_size, max_size), PILImage.Resampling.LANCZOS)
 ## 已知限制
 
 - **工具调用总时长默认 120 秒**（`agent_runner.config.misc.tool_call_timeout`）。
-  两段式处理很多片时可能超时，这时调大该配置，或降低 `vision_concurrency` 之外先降片数。
-- **模型必须支持图片输入**（`modalities` 为空或包含 `image`）才走默认模式；
-  否则框架不会把工具返回的图塞回上下文，请改用两段式。
+  两段式处理很多片时可能超时，这时调大该配置，或减少片数（`max_slices`）。
 - 片数超过 `max_slices` 时**整张放弃**，不降采样也不截断 —— 这是有意的：
   一张 10 万像素高的图切出来没人读得完，提示用户分几张发更实际。
 - 只处理当前消息里的图片。历史消息里的图片、引用消息里的图片不会切。

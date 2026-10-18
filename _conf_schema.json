@@ -38,27 +38,45 @@
   "two_stage_enabled": {
     "type": "bool",
     "description": "两段式识别（插件先逐片转文字再汇总）",
-    "default": false,
-    "hint": "关闭时切片直接交给当前模型逐片阅读；开启后由插件调用识图模型逐片转写并汇总，当前模型只看汇总文字。适合当前模型不支持图片输入的情况。"
+    "default": true,
+    "hint": "开启后由插件调用识图模型逐片转写并汇总，当前对话模型只收到汇总文字。关闭则把切片图片直接塞给当前对话模型——当前模型不支持图片输入时会看不到内容，且片数一多容易顶爆上下文。"
   },
   "vision_provider_id": {
     "type": "string",
-    "description": "两段式的识图模型（留空 = 当前对话模型）",
+    "description": "识图模型（留空 = 自动选第一个支持图片的模型）",
     "default": "",
     "_special": "select_provider",
-    "hint": "只在开启两段式识别时生效。",
+    "hint": "必须选支持图片输入的模型。留空时自动挑选已启用且 modalities 含 image 的模型。",
     "condition": {
       "two_stage_enabled": true
     }
   },
   "summary_provider_id": {
     "type": "string",
-    "description": "两段式的汇总模型（留空 = 跟随识图模型）",
+    "description": "汇总模型（留空 = 当前对话模型）",
     "default": "",
     "_special": "select_provider",
-    "hint": "只在开启两段式识别时生效。",
+    "hint": "汇总只是文本任务，留空就用当前对话模型，更省钱也更快。",
     "condition": {
       "two_stage_enabled": true
+    }
+  },
+  "summary_chunk_chars": {
+    "type": "int",
+    "description": "汇总时分段的最大字符数",
+    "default": 12000,
+    "hint": "逐片识别结果拼起来超过这个长度时，先分段汇总再合并一次，避免单次请求撑爆上下文。",
+    "condition": {
+      "two_stage_enabled": true
+    }
+  },
+  "direct_max_images": {
+    "type": "int",
+    "description": "直传模式最多回传几张切片",
+    "default": 6,
+    "hint": "只在关闭两段式识别时生效。切片以 base64 内联进上下文，片数越多越容易触发上下文压缩。",
+    "condition": {
+      "two_stage_enabled": false
     }
   },
   "vision_concurrency": {

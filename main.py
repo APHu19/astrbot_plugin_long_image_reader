@@ -1,6 +1,7 @@
 """长图切分识图插件。
 
 模型主动调用工具时，把超长图片按纯色/边框行切成可读片段，
+交给识图模型逐片转写后再把文字结果返回对话模型，
 绕开「启用图片压缩」把长图压成一条细线导致的细节丢失。
 """
 
@@ -174,8 +175,8 @@ def _write_slices(
 @register(
     "astrbot_plugin_long_image_reader",
     "APHu19",
-    "把超长图片按纯色/边框行切成清晰片段再交给模型阅读，绕开图片压缩导致的细节丢失。",
-    "1.0.0",
+    "把超长图片按纯色/边框行切成清晰片段，交给识图模型逐片转文字后回传结果，绕开图片压缩导致的细节丢失。",
+    "1.1.0",
 )
 class LongImageReader(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
@@ -294,22 +295,54 @@ class LongImageReader(Star):
             logger.debug(f"[long_image_reader] 解析原图失败：{exc}")
             return None
 
-    async def _resolve_provider(self, provider_id: str, umo: str) -> Provider | None:
+    @staticmethod
+    def _supports_image(provider: Provider) -> bool:
+        # 空列表等同未配置，框架按支持图片处理
+        modalities = provider.provider_config.get("modalities", None)
+        if modalities == []:
+            return True
+        return isinstance(modalities, list) and "image" in modalities
+
+    def _find_image_provider(self) -> Provider | None:
+        for candidate in self.context.get_all_providers():
+            if self._supports_image(candidate):
+                return candidate
+        return None
+
+    async def _resolve_vision_provider(self, umo: str) -> Provider | None:
+        provider_id = self._cfg_str("vision_provider_id", "")
         if provider_id:
             candidate = self.context.get_provider_by_id(provider_id)
             return candidate if isinstance(candidate, Provider) else None
+        found = self._find_image_provider()
+        if found is not None:
+            return found
+        # 没有配识图模型时才退回当前模型，由调用方检查它是否真能看图
         return await self.context.get_using_provider_async(umo)
+
+    async def _resolve_summary_provider(self, umo: str, vision: Provider) -> Provider:
+        provider_id = self._cfg_str("summary_provider_id", "")
+        if provider_id:
+            candidate = self.context.get_provider_by_id(provider_id)
+            if isinstance(candidate, Provider):
+                return candidate
+        # 汇总只是文本任务，优先交给当前对话模型，省钱也更快
+        current = await self.context.get_using_provider_async(umo)
+        return current if current is not None else vision
 
     async def _describe_slices(
         self,
         event: AstrMessageEvent,
         paths: list[Path],
         focus: str,
-    ) -> str:
+    ) -> tuple[bool, str]:
         umo = event.unified_msg_origin
-        vision = await self._resolve_provider(self._cfg_str("vision_provider_id", ""), umo)
+        vision = await self._resolve_vision_provider(umo)
         if vision is None:
-            return "没有取到可用的识图模型，两段式识别无法进行。切分文件已写入临时目录，可供人工查看。"
+            return False, "没有取到可用的识图模型，无法识别这张长图。请在插件配置里指定识图模型。"
+        if not self._supports_image(vision):
+            provider_id = vision.provider_config.get("id", "当前模型")
+            return False, f"识图模型 {provider_id} 不支持图片输入，请改用支持视觉的模型。"
 
         slice_prompt = self._cfg_str("slice_prompt", "") or DEFAULT_SLICE_PROMPT
         semaphore = asyncio.Semaphore(max(1, self._cfg_int("vision_concurrency", 4)))
@@ -343,25 +376,40 @@ class LongImageReader(Star):
                 parts.append(f"[第 {index}/{total} 片超时未识别]")
 
         merged = "\n\n".join(f"### 第 {index}/{total} 片\n{text}" for index, text in enumerate(parts, start=1))
+        summary_provider = await self._resolve_summary_provider(umo, vision)
+        return True, await self._summarize(summary_provider, merged, focus, total, call_timeout)
+
+    async def _summarize(
+        self,
+        provider: Provider,
+        merged: str,
+        focus: str,
+        total: int,
+        call_timeout: int,
+    ) -> str:
         summary_prompt = self._cfg_str("summary_prompt", "") or DEFAULT_SUMMARY_PROMPT
-        prompt = (
-            summary_prompt.replace("{focus}", focus or "（用户没有额外说明）")
-            .replace("{parts}", merged)
-            .replace("{total}", str(total))
-        )
-        summary_provider = await self._resolve_provider(self._cfg_str("summary_provider_id", ""), umo)
-        if summary_provider is None:
-            summary_provider = vision
-        try:
-            response = await asyncio.wait_for(
-                summary_provider.text_chat(prompt=prompt),
-                timeout=call_timeout,
+        chunk_chars = max(500, self._cfg_int("summary_chunk_chars", 12000))
+        chunks = [merged[i : i + chunk_chars] for i in range(0, len(merged), chunk_chars)]
+
+        async def ask(body: str, index: int) -> str:
+            prompt = (
+                summary_prompt.replace("{focus}", focus or "（用户没有额外说明）")
+                .replace("{parts}", body)
+                .replace("{total}", str(total))
             )
-        except Exception as exc:
-            logger.warning(f"[long_image_reader] 汇总失败：{exc}")
-            return merged
-        summary = (response.completion_text or "").strip()
-        return summary or merged
+            try:
+                response = await asyncio.wait_for(provider.text_chat(prompt=prompt), timeout=call_timeout)
+            except Exception as exc:
+                logger.warning(f"[long_image_reader] 汇总第 {index} 段失败：{exc}")
+                return body
+            return (response.completion_text or "").strip() or body
+
+        if len(chunks) == 1:
+            return await ask(merged, 1)
+
+        # 识别结果太长时先分段汇总，再把分段结果合并一次，避免单次请求撑爆上下文
+        partials = [await ask(chunk, index) for index, chunk in enumerate(chunks, start=1)]
+        return await ask("\n\n".join(partials), len(chunks) + 1)
 
     # ---------- 工具 ----------
 
@@ -433,26 +481,44 @@ class LongImageReader(Star):
 
         total = len(paths)
         orientation = "横向" if horizontal else "纵向"
-        if self._cfg_bool("two_stage_enabled", False):
-            result_text = await self._describe_slices(event, paths, focus)
+        if self._cfg_bool("two_stage_enabled", True):
+            described, result_text = await self._describe_slices(event, paths, focus)
             self._finalize_temp(out_dir)
+            if not described:
+                return result_text
             return (
                 f"已把这张 {width}×{height} 的{orientation}长图切成 {total} 片并逐片识别，"
                 f"以下是合并后的识图结果：\n\n{result_text}"
             )
 
+        # 直传模式：图片会内联进上下文，片数一多就顶爆上下文，因此只送前若干片
+        current = await self.context.get_using_provider_async(event.unified_msg_origin)
+        if current is not None and not self._supports_image(current):
+            # 图塞给纯文本模型会被换成 [Image] 占位，不如直接说清楚
+            self._finalize_temp(out_dir)
+            return (
+                f"已切成 {total} 片，但当前对话模型不支持图片输入，直传模式无法让它看图。"
+                "请管理员把 two_stage_enabled 打开，改用识图模型逐片转文字。"
+            )
+        limit = max(1, self._cfg_int("direct_max_images", 6))
+        selected = paths[:limit]
         contents: list[mcp.types.TextContent | mcp.types.ImageContent] = [
             mcp.types.TextContent(
                 type="text",
                 text=(
-                    f"已把这张 {width}×{height} 的{orientation}长图切成 {total} 片"
-                    f"（每片最长边不超过 {window}px），按从上到下的顺序附在下方。"
+                    f"已把这张 {width}×{height} 的{orientation}长图切成 {total} 片，"
+                    f"本次附上前 {len(selected)} 片（每片最长边不超过 {window}px）。"
                     "请逐片阅读后再回答，不要臆测没有看到的部分。"
+                    + (
+                        f"剩余 {total - len(selected)} 片没有附上，需要时请改用两段式识别。"
+                        if total > len(selected)
+                        else ""
+                    )
                 ),
             )
         ]
         mime = "image/png" if fmt == "png" else "image/jpeg"
-        for path in paths:
+        for path in selected:
             payload = base64.b64encode(await asyncio.to_thread(path.read_bytes)).decode("ascii")
             contents.append(mcp.types.ImageContent(type="image", data=payload, mimeType=mime))
         self._finalize_temp(out_dir)
@@ -479,6 +545,6 @@ class LongImageReader(Star):
                 f"\n\n[系统提示] 用户本条消息附带了一张 {width}×{height} 的超长图片，"
                 "框架会把它压缩后交给你，细节多半看不清。"
                 "如果需要准确读取图中的文字，请调用 read_long_image 工具，"
-                "它会把原图切成清晰的片段再给你。"
+                "它会把原图切成清晰的片段，用识图模型逐片读成文字后返回给你。"
             )
             return
