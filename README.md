@@ -103,6 +103,13 @@ working_img.thumbnail((max_size, max_size), PILImage.Resampling.LANCZOS)
 | `vision_total_budget` | 100 | 两段式逐片识别总预算（秒），超出的片标记为超时 |
 | `slice_prompt` | 空 | 逐片识别提示词，空 = 内置默认 |
 | `summary_prompt` | 空 | 汇总提示词，空 = 内置默认 |
+
+两个提示词的占位符：`slice_prompt` 支持 `{index}` / `{total}`；
+`summary_prompt` 支持 `{message}`（用户提出识图要求时的**消息全文**）/ `{parts}`（逐片识别结果）/ `{total}`。
+
+汇总模型拿到的是完整消息而不是只有「用户想看图」这句话，所以像
+「把第三段和第五段的时间戳和金额读给我」这种带明确诉求的要求能被正确照顾到。
+模型调用工具时另外传了 `focus` 的话，会追加在消息全文后面，不会被吞掉。
 | `uniform_stddev_threshold` | 3.0 | 纯色行判定阈值，越小越严格 |
 | `overlap_ratio` | 0.02 | 相邻片重复比例 |
 | `max_scan_width` | 256 | 判定纯色行时的扫描宽度 |

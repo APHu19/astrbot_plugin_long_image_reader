@@ -38,11 +38,15 @@ DEFAULT_SLICE_PROMPT = (
     "不要总结，不要省略，不要补写没看到的内容。"
 )
 DEFAULT_SUMMARY_PROMPT = (
-    "用户的原问题或关注点：{focus}\n\n"
+    "用户提出识图要求时的完整消息如下：\n"
+    "---\n"
+    "{message}\n"
+    "---\n\n"
     "下面是一张超长图片按从上到下顺序切分成的 {total} 片，以及每片各自的识别结果：\n\n"
     "{parts}\n\n"
     "请把这些结果合并成一份连续、去重、不丢信息的识图结果，"
     "保留关键文字、数字、时间、名称与结构；无法辨认处标注「无法辨认」。"
+    "合并时优先保留用户消息里明确关心的内容。"
 )
 
 
@@ -377,13 +381,23 @@ class LongImageReader(Star):
 
         merged = "\n\n".join(f"### 第 {index}/{total} 片\n{text}" for index, text in enumerate(parts, start=1))
         summary_provider = await self._resolve_summary_provider(umo, vision)
-        return True, await self._summarize(summary_provider, merged, focus, total, call_timeout)
+        message_text = self._request_message_text(event, focus)
+        return True, await self._summarize(summary_provider, merged, message_text, total, call_timeout)
+
+    @staticmethod
+    def _request_message_text(event: AstrMessageEvent, focus: str) -> str:
+        """取用户提出识图要求时的消息全文，供汇总模型判断该保留什么。"""
+        text = (event.get_message_str() or "").strip()
+        extra = focus.strip()
+        if extra and extra not in text:
+            text = f"{text}\n（模型补充的关注点：{extra}）" if text else extra
+        return text or "（用户没有留下文字说明）"
 
     async def _summarize(
         self,
         provider: Provider,
         merged: str,
-        focus: str,
+        message_text: str,
         total: int,
         call_timeout: int,
     ) -> str:
@@ -393,7 +407,7 @@ class LongImageReader(Star):
 
         async def ask(body: str, index: int) -> str:
             prompt = (
-                summary_prompt.replace("{focus}", focus or "（用户没有额外说明）")
+                summary_prompt.replace("{message}", message_text)
                 .replace("{parts}", body)
                 .replace("{total}", str(total))
             )
@@ -426,7 +440,7 @@ class LongImageReader(Star):
 
         Args:
             image_index(int): 第几张图片，从 1 开始计数，默认 1。
-            focus(str): 用户想重点看清的内容或原问题，可为空。
+            focus(str): 用户想重点看清的内容或原问题，可为空；用户消息全文会自动带上。
         """
         if not self._cfg_bool("enable", True):
             return "长图切分功能已被管理员关闭。"

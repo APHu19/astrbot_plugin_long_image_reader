@@ -118,8 +118,8 @@
   "summary_prompt": {
     "type": "text",
     "description": "两段式的汇总提示词（{focus}、{parts}、{total} 会被替换）",
-    "default": "用户的原问题或关注点：{focus}\n\n下面是一张超长图片按从上到下顺序切分成的 {total} 片，以及每片各自的识别结果：\n\n{parts}\n\n请把这些结果合并成一份连续、去重、不丢信息的识图结果，保留关键文字、数字、时间、名称与结构；无法辨认处标注「无法辨认」。",
-    "hint": "留空则使用内置默认提示词。",
+    "default": "用户提出识图要求时的完整消息如下：\n---\n{message}\n---\n\n下面是一张超长图片按从上到下顺序切分成的 {total} 片，以及每片各自的识别结果：\n\n{parts}\n\n请把这些结果合并成一份连续、去重、不丢信息的识图结果，保留关键文字、数字、时间、名称与结构；无法辨认处标注「无法辨认」。合并时优先保留用户消息里明确关心的内容。",
+    "hint": "可用占位符：{message} 用户提出识图要求时的消息全文、{parts} 逐片识别结果、{total} 片数。留空则使用内置默认提示词。",
     "condition": {
       "two_stage_enabled": true
     }
@@ -146,14 +146,21 @@
     "type": "string",
     "description": "切片格式",
     "default": "jpeg",
-    "options": ["jpeg", "png"],
+    "options": [
+      "jpeg",
+      "png"
+    ],
     "hint": "jpeg 体积小适合照片截图，png 适合带透明或纯文字的界面截图。"
   },
   "temp_file_policy": {
     "type": "string",
     "description": "临时文件处理",
     "default": "keep",
-    "options": ["keep", "delete", "delete_after_24h"],
+    "options": [
+      "keep",
+      "delete",
+      "delete_after_24h"
+    ],
     "hint": "keep 全部保留在 data/temp/long_image/<日期>/；delete 本次用完立即删除；delete_after_24h 每次运行时清掉 24 小时前的旧目录。"
   }
 }
