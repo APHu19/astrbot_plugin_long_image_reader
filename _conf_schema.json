@@ -11,6 +11,12 @@
     "default": true,
     "hint": "仅在检测到长图时追加一行系统提示，让模型自己决定是否调用工具。"
   },
+  "skip_caption_for_long_image": {
+    "type": "bool",
+    "description": "长图跳过整图转述（省钱）",
+    "default": true,
+    "hint": "开启后，检测到长图时不再让「图片转述模型」读整张压缩图，改由本插件切片后逐片识别。整图转述读的是压缩后的糊图，既贵又读不准。"
+  },
   "max_side_override": {
     "type": "int",
     "description": "单片最大边长（0 = 跟随框架的图片压缩最大边长）",

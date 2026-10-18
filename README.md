@@ -39,6 +39,17 @@ working_img.thumbnail((max_size, max_size), PILImage.Resampling.LANCZOS)
 
 普通图片、没调工具的情况，插件完全不介入。
 
+### 顺带掐掉框架的整图转述
+
+框架自带的「图片转述」（`default_image_caption_provider_id`）会在 `on_llm_request`
+**之前**执行，把整张压缩后的长图丢给转述模型读一遍，产出一段 `<image_caption>`。
+对长图来说这一步既贵又读不准：压缩后 1080×8100 会变成 171×1280，字全糊了。
+
+插件在 `initialize()` 里包住 `astr_main_agent._ensure_img_caption`，检测到长图时
+直接返回、不做转述，同时清空 `req.image_urls`（否则框架的
+`_select_image_chat_provider` 会把整轮请求切给视觉模型）并补一条占位说明。
+普通图片仍走原来的转述路径。开关是 `skip_caption_for_long_image`，默认开。
+
 ## 为什么要用识图模型而不是把图塞回对话
 
 早期版本把切片以 `ImageContent` 返回给工具调用方，让对话模型自己看。实测有两个问题：
@@ -89,6 +100,7 @@ working_img.thumbnail((max_size, max_size), PILImage.Resampling.LANCZOS)
 | --- | --- | --- |
 | `enable` | 开 | 总开关 |
 | `hint_enabled` | 开 | 是否向模型注入长图提示 |
+| `skip_caption_for_long_image` | 开 | 长图跳过框架的整图转述（省一次视觉模型调用） |
 | `max_side_override` | 0 | 单片最大边长，0 = 跟随框架的「最大边长」 |
 | `slice_threshold` | 0 | 触发切分的边长阈值，0 = 与单片最大边长相同 |
 | `min_aspect_ratio` | 1.5 | 长宽比门槛，正方形大图不切 |
@@ -138,7 +150,7 @@ working_img.thumbnail((max_size, max_size), PILImage.Resampling.LANCZOS)
 位置取自配置文件 `cmd_config.json` 所在目录，与启动时的工作目录无关。
 
 早期版本用 `get_astrbot_temp_path()`，那个函数跟随进程 cwd，从别处启动 AstrBot 时
-会把切片写到 `gsuid_core/data/temp/long_image` 之类的错误位置。
+会把切片写到 `gsuid_core/data/temp/long_image` 之类的错误位置。已经清掉了旧目录。
 
 ## 已知限制
 
@@ -149,3 +161,5 @@ working_img.thumbnail((max_size, max_size), PILImage.Resampling.LANCZOS)
 - 只处理当前消息里的图片。历史消息里的图片、引用消息里的图片不会切。
 - 切点判定基于行灰度标准差。纯色渐变背景、密集纹理背景上可能找不到纯色行，
   这时会退化成窗口内最均匀处硬切。
+- `skip_caption_for_long_image` 是**改写框架函数**实现的（和 AstrNa 一样的做法）。
+  多个插件同时改写 `_ensure_img_caption` 时后加载的在外层，长图判断仍然生效。

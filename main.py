@@ -19,11 +19,13 @@ from pathlib import Path
 import mcp.types
 from PIL import Image as PILImage
 
+import astrbot.core.astr_main_agent as astr_main_agent
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image
 from astrbot.api.provider import Provider, ProviderRequest
 from astrbot.api.star import Context, Star, register
+from astrbot.core.agent.message import TextPart
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 DEFAULT_MAX_SIZE = 1280
@@ -32,7 +34,10 @@ UNIFORM_SPREAD = 2
 SCAN_PIXEL_BUDGET = 2_000_000
 TEMP_SUBDIR = "long_image"
 DONE_EXTRA_KEY = "long_image_reader_done"
+SIZE_EXTRA_KEY = "long_image_reader_size"
 CACHE_MAX_ENTRIES = 32
+
+CAPTION_SKIP_TEXT = "<image_caption>[这是一张超长图片，框架的整图转述已跳过——整图会被压成一条细线，转述读不出内容。请调用 read_long_image 工具读取。]</image_caption>"
 
 DEFAULT_SLICE_PROMPT = (
     "这是一张超长图片按从上到下顺序切分后的第 {index}/{total} 片。"
@@ -225,10 +230,11 @@ def _write_slices(
     "astrbot_plugin_long_image_reader",
     "APHu19",
     "把超长图片按纯色/边框行切成清晰片段，交给识图模型逐片转文字后回传结果，绕开图片压缩导致的细节丢失。",
-    "1.2.0",
+    "1.3.0",
 )
 class LongImageReader(Star):
     _cache: _TranscriptCache | None = None
+    _previous_caption: object | None = None
 
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
@@ -645,23 +651,73 @@ class LongImageReader(Star):
 
     @filter.on_llm_request()
     async def inject_long_image_hint(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
-        if not self._cfg_bool("enable", True) or not self._cfg_bool("hint_enabled", True):
+        long_size = await self._detect_long_image(event)
+        if long_size is None:
             return
+        if not self._cfg_bool("hint_enabled", True):
+            return
+        width, height = long_size
+        req.system_prompt += (
+            f"\n\n[系统提示] 用户本条消息附带了一张 {width}×{height} 的超长图片，"
+            "框架会把它压缩后交给你，细节多半看不清。"
+            "如果需要准确读取图中的文字，请调用 read_long_image 工具，"
+            "它会把原图切成清晰的片段，用识图模型逐片读成文字后返回给你。"
+        )
+
+    async def _detect_long_image(self, event: AstrMessageEvent) -> tuple[int, int] | None:
+        if not self._cfg_bool("enable", True):
+            return None
+        cached = event.get_extra(SIZE_EXTRA_KEY)
+        if isinstance(cached, tuple) and len(cached) == 2:
+            return cached
         max_side = self._resolve_max_side()
         for component in self._collect_images(event):
-            candidate = component.path or component.file
-            if not candidate or not os.path.isfile(candidate):
+            # 平台的 Image 组件常只有 file/url，path 为空，必须走解析才能拿到本地文件
+            candidate = await self._resolve_source(component)
+            if not candidate:
                 continue
             size = await asyncio.to_thread(_probe_size, candidate)
             if size is None:
                 continue
-            width, height = size
-            if not self._should_split(width, height, max_side):
-                continue
-            req.system_prompt += (
-                f"\n\n[系统提示] 用户本条消息附带了一张 {width}×{height} 的超长图片，"
-                "框架会把它压缩后交给你，细节多半看不清。"
-                "如果需要准确读取图中的文字，请调用 read_long_image 工具，"
-                "它会把原图切成清晰的片段，用识图模型逐片读成文字后返回给你。"
-            )
+            if self._should_split(size[0], size[1], max_side):
+                event.set_extra(SIZE_EXTRA_KEY, size)
+                return size
+        return None
+
+    async def initialize(self) -> None:
+        """框架在 on_llm_request 之前就做完整图转述，只能包住那个函数。"""
+        if not self._cfg_bool("skip_caption_for_long_image", True):
             return
+        previous = astr_main_agent._ensure_img_caption
+        self._previous_caption = previous
+        reader = self
+
+        async def guarded(
+            event: AstrMessageEvent,
+            req: ProviderRequest,
+            cfg: dict,
+            plugin_context: Context,
+            image_caption_provider: str,
+        ) -> None:
+            size = await reader._detect_long_image(event)
+            if size is None:
+                await previous(event, req, cfg, plugin_context, image_caption_provider)
+                return
+            # 必须清空 image_urls，否则框架会把整轮请求切给视觉模型
+            req.image_urls = []
+            req.extra_user_content_parts.append(
+                TextPart(
+                    text=(
+                        f"[Image Attachment: {size[0]}×{size[1]} 超长图片，已跳过整图转述]"
+                        "请调用 read_long_image 工具读取其中的内容。"
+                    )
+                )
+            )
+            logger.debug(f"[long_image_reader] 跳过整图转述：{size[0]}×{size[1]}")
+
+        astr_main_agent._ensure_img_caption = guarded
+        logger.debug("[long_image_reader] 已接管整图转述：长图改由切片工具读取")
+
+    async def terminate(self) -> None:
+        """卸载时还原框架函数，避免插件被禁用后仍劫持转述。"""
+        astr_main_agent._ensure_img_caption = self._previous_caption
