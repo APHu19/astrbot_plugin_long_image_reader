@@ -97,6 +97,7 @@ working_img.thumbnail((max_size, max_size), PILImage.Resampling.LANCZOS)
 | `vision_provider_id` | 空 | 识图模型，空 = 自动选第一个支持图片的模型 |
 | `summary_provider_id` | 空 | 汇总模型，空 = 当前对话模型 |
 | `summary_chunk_chars` | 12000 | 汇总分段长度 |
+| `include_message_text` | 开 | 把用户消息全文传给汇总模型 |
 | `direct_max_images` | 6 | 直传模式最多回传几张 |
 | `vision_concurrency` | 4 | 两段式并发数 |
 | `vision_timeout` | 90 | 两段式单次调用超时（秒） |
@@ -110,6 +111,9 @@ working_img.thumbnail((max_size, max_size), PILImage.Resampling.LANCZOS)
 汇总模型拿到的是完整消息而不是只有「用户想看图」这句话，所以像
 「把第三段和第五段的时间戳和金额读给我」这种带明确诉求的要求能被正确照顾到。
 模型调用工具时另外传了 `focus` 的话，会追加在消息全文后面，不会被吞掉。
+
+不想传全文就把 `include_message_text` 关掉：这时 `{message}` 只保留 `focus`，
+群聊里消息很长时能省下不少 token，代价是汇总模型看不到用户的具体诉求。
 | `uniform_stddev_threshold` | 3.0 | 纯色行判定阈值，越小越严格 |
 | `overlap_ratio` | 0.02 | 相邻片重复比例 |
 | `max_scan_width` | 256 | 判定纯色行时的扫描宽度 |

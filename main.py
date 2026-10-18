@@ -384,11 +384,13 @@ class LongImageReader(Star):
         message_text = self._request_message_text(event, focus)
         return True, await self._summarize(summary_provider, merged, message_text, total, call_timeout)
 
-    @staticmethod
-    def _request_message_text(event: AstrMessageEvent, focus: str) -> str:
+    def _request_message_text(self, event: AstrMessageEvent, focus: str) -> str:
         """取用户提出识图要求时的消息全文，供汇总模型判断该保留什么。"""
-        text = (event.get_message_str() or "").strip()
         extra = focus.strip()
+        if not self._cfg_bool("include_message_text", True):
+            # 关掉全文传入时只保留模型自己挑出的关注点，省 token
+            return extra or "（用户没有留下文字说明）"
+        text = (event.get_message_str() or "").strip()
         if extra and extra not in text:
             text = f"{text}\n（模型补充的关注点：{extra}）" if text else extra
         return text or "（用户没有留下文字说明）"

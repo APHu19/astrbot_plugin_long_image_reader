@@ -70,6 +70,12 @@
       "two_stage_enabled": true
     }
   },
+  "include_message_text": {
+    "type": "bool",
+    "description": "把用户提出识图要求时的消息全文传给汇总模型",
+    "default": true,
+    "hint": "开启后汇总提示词的 {message} 是本条消息全文，能照顾到「只要第三段的时间戳」这类具体诉求；关闭后 {message} 只保留模型自己挑出的关注点，更省 token。"
+  },
   "direct_max_images": {
     "type": "int",
     "description": "直传模式最多回传几张切片",
