@@ -3,3 +3,6 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+
+# 测试脚本误把 AstrBot 的 data 目录建在插件里时，别让它进仓库
+data/

@@ -32,7 +32,11 @@ working_img.thumbnail((max_size, max_size), PILImage.Resampling.LANCZOS)
 只有模型的工具调用才会触发，用户说「帮我看看这张图」不会自动生效：
 
 1. 插件挂了 `on_llm_request`。当本条消息的图片实测是长图（超过阈值 + 长宽比达标）时，
-   往 system prompt 追加一行提示，告诉模型「图被压过了，要准确读字请调 `read_long_image`」。
+   往 `req.extra_user_content_parts` 追加一行提示，告诉模型「图被压过了，要准确读字请调
+   `read_long_image`」。
+   **不要改成改 `system_prompt`**：system 排在历史之前，动它会让整段历史的前缀缓存失效。
+   实测 60 条历史、1.6 万 token 的会话，改 system 后全价输入 15,789 token，
+   走 `extra_user_content_parts` 只有 174 token。
 2. 模型自己决定是否调用。调用才会切片。
 3. 切片由插件直接送给识图模型（`provider.text_chat(image_urls=[...])`），
    **这条路不经过 `prepare_model_image`，切片不会被二次压缩。**

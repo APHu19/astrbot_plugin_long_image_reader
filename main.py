@@ -206,6 +206,7 @@ def _write_slices(
     out_dir: Path,
     fmt: str,
     horizontal: bool,
+    max_short_side: int = 0,
 ) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     total = len(ranges)
@@ -215,6 +216,11 @@ def _write_slices(
         piece = work.crop((0, start, work.width, end))
         if horizontal:
             piece = piece.transpose(PILImage.Transpose.TRANSPOSE)
+        # 视觉模型按像素计价，短边再压一档能省近半输入 token
+        if max_short_side > 0 and min(piece.size) > max_short_side:
+            scale = max_short_side / min(piece.size)
+            target = (max(1, round(piece.width * scale)), max(1, round(piece.height * scale)))
+            piece = piece.resize(target, PILImage.Resampling.LANCZOS)
         name = f"{index:02d}_of_{total:02d}"
         if fmt == "png":
             path = out_dir / f"{name}.png"
@@ -230,7 +236,7 @@ def _write_slices(
     "astrbot_plugin_long_image_reader",
     "APHu19",
     "把超长图片按纯色/边框行切成清晰片段，交给识图模型逐片转文字后回传结果，绕开图片压缩导致的细节丢失。",
-    "1.3.0",
+    "1.4.0",
 )
 class LongImageReader(Star):
     _cache: _TranscriptCache | None = None
@@ -402,6 +408,24 @@ class LongImageReader(Star):
         current = await self.context.get_using_provider_async(umo)
         return current if current is not None else vision
 
+    @staticmethod
+    def _thinking_off(provider: Provider) -> dict[str, object] | None:
+        # 浅拷贝 provider 改不到请求体（框架读的是实例上的 provider_config），
+        # 只能临时改原对象，调用完再还原。
+        config = provider.provider_config
+        original = config.get("custom_extra_body")
+        extra = dict(original) if isinstance(original, dict) else {}
+        extra["enable_thinking"] = False
+        config["custom_extra_body"] = extra
+        return dict(original) if isinstance(original, dict) else None
+
+    @staticmethod
+    def _thinking_restore(provider: Provider, original: dict[str, object] | None) -> None:
+        if original is None:
+            provider.provider_config.pop("custom_extra_body", None)
+        else:
+            provider.provider_config["custom_extra_body"] = original
+
     async def _describe_slices(
         self,
         event: AstrMessageEvent,
@@ -436,10 +460,19 @@ class LongImageReader(Star):
             text = (response.completion_text or "").strip()
             return text or f"[第 {index}/{total} 片没有识别出内容]"
 
-        tasks = [asyncio.create_task(describe(index, path)) for index, path in enumerate(paths, start=1)]
-        done, pending = await asyncio.wait(tasks, timeout=budget)
-        for task in pending:
-            task.cancel()
+        # 转写是照着图抄字，思考链只会白烧输出 token；改的是共享实例，必须还原
+        quiet = self._cfg_bool("disable_thinking", True)
+        original_extra = self._thinking_off(vision) if quiet else None
+        try:
+            tasks = [asyncio.create_task(describe(index, path)) for index, path in enumerate(paths, start=1)]
+            done, pending = await asyncio.wait(tasks, timeout=budget)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        finally:
+            if quiet:
+                self._thinking_restore(vision, original_extra)
         parts: list[str] = []
         for index, task in enumerate(tasks, start=1):
             if task in done and not task.cancelled() and task.exception() is None:
@@ -590,7 +623,15 @@ class LongImageReader(Star):
         digest = hashlib.sha1(event.unified_msg_origin.encode("utf-8")).hexdigest()[:8]
         out_dir = self._temp_root() / time.strftime("%Y%m%d") / f"{digest}_{int(time.time())}"
         try:
-            paths = await asyncio.to_thread(_write_slices, work, ranges, out_dir, fmt, horizontal)
+            paths = await asyncio.to_thread(
+                _write_slices,
+                work,
+                ranges,
+                out_dir,
+                fmt,
+                horizontal,
+                self._cfg_int("slice_short_side", 0),
+            )
         except OSError as exc:
             logger.error(f"[long_image_reader] 写切片失败：{exc}")
             return "切分后的图片写入临时目录失败，无法继续。"
@@ -657,11 +698,16 @@ class LongImageReader(Star):
         if not self._cfg_bool("hint_enabled", True):
             return
         width, height = long_size
-        req.system_prompt += (
-            f"\n\n[系统提示] 用户本条消息附带了一张 {width}×{height} 的超长图片，"
-            "框架会把它压缩后交给你，细节多半看不清。"
-            "如果需要准确读取图中的文字，请调用 read_long_image 工具，"
-            "它会把原图切成清晰的片段，用识图模型逐片读成文字后返回给你。"
+        # 不能改 system_prompt：它排在历史之前，一改整段历史前缀缓存全失效
+        req.extra_user_content_parts.append(
+            TextPart(
+                text=(
+                    f"[系统提示] 用户本条消息附带了一张 {width}×{height} 的超长图片，"
+                    "框架会把它压缩后交给你，细节多半看不清。"
+                    "如果需要准确读取图中的文字，请调用 read_long_image 工具，"
+                    "它会把原图切成清晰的片段，用识图模型逐片读成文字后返回给你。"
+                )
+            )
         )
 
     async def _detect_long_image(self, event: AstrMessageEvent) -> tuple[int, int] | None:
@@ -705,13 +751,9 @@ class LongImageReader(Star):
                 return
             # 必须清空 image_urls，否则框架会把整轮请求切给视觉模型
             req.image_urls = []
+            # 调用提示统一由 inject_long_image_hint 注入，这里只留占位说明
             req.extra_user_content_parts.append(
-                TextPart(
-                    text=(
-                        f"[Image Attachment: {size[0]}×{size[1]} 超长图片，已跳过整图转述]"
-                        "请调用 read_long_image 工具读取其中的内容。"
-                    )
-                )
+                TextPart(text=f"[Image Attachment: {size[0]}×{size[1]} 超长图片，已跳过整图转述]")
             )
             logger.debug(f"[long_image_reader] 跳过整图转述：{size[0]}×{size[1]}")
 

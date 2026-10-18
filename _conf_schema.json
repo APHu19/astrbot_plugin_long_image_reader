@@ -118,6 +118,18 @@
       "two_stage_enabled": true
     }
   },
+  "disable_thinking": {
+    "type": "bool",
+    "description": "识图时关闭思考",
+    "default": true,
+    "hint": "转写文字是照着图抄，不需要推理。实测关闭思考后单片的输出 token 从 505 降到 67，识别质量不变。关闭后部分模型可能拒绝，出问题再打开。"
+  },
+  "slice_short_side": {
+    "type": "int",
+    "description": "切片短边上限（0 = 不缩）",
+    "default": 0,
+    "hint": "视觉模型按像素计价。实测把短边从 1080 缩到 768，输入 token 降 47%。填 0 保持原尺寸（最清晰），填 768 省一半输入，填 512 更省但小字可能糊。"
+  },
   "slice_prompt": {
     "type": "text",
     "description": "两段式的逐片识别提示词（{index} 与 {total} 会被替换）",
