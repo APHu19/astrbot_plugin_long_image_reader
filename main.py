@@ -720,4 +720,7 @@ class LongImageReader(Star):
 
     async def terminate(self) -> None:
         """卸载时还原框架函数，避免插件被禁用后仍劫持转述。"""
+        if self._previous_caption is None:
+            return
         astr_main_agent._ensure_img_caption = self._previous_caption
+        self._previous_caption = None
