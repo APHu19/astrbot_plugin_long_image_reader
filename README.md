@@ -104,6 +104,11 @@ working_img.thumbnail((max_size, max_size), PILImage.Resampling.LANCZOS)
 | `vision_total_budget` | 100 | 两段式逐片识别总预算（秒），超出的片标记为超时 |
 | `slice_prompt` | 空 | 逐片识别提示词，空 = 内置默认 |
 | `summary_prompt` | 空 | 汇总提示词，空 = 内置默认 |
+| `uniform_stddev_threshold` | 3.0 | 纯色行判定阈值，越小越严格 |
+| `overlap_ratio` | 0.02 | 相邻片重复比例 |
+| `max_scan_width` | 256 | 判定纯色行时的扫描宽度 |
+| `output_format` | jpeg | jpeg / png |
+| `temp_file_policy` | keep | keep / delete / delete_after_24h |
 
 两个提示词的占位符：`slice_prompt` 支持 `{index}` / `{total}`；
 `summary_prompt` 支持 `{message}`（用户提出识图要求时的**消息全文**）/ `{parts}`（逐片识别结果）/ `{total}`。
@@ -114,11 +119,26 @@ working_img.thumbnail((max_size, max_size), PILImage.Resampling.LANCZOS)
 
 不想传全文就把 `include_message_text` 关掉：这时 `{message}` 只保留 `focus`，
 群聊里消息很长时能省下不少 token，代价是汇总模型看不到用户的具体诉求。
-| `uniform_stddev_threshold` | 3.0 | 纯色行判定阈值，越小越严格 |
-| `overlap_ratio` | 0.02 | 相邻片重复比例 |
-| `max_scan_width` | 256 | 判定纯色行时的扫描宽度 |
-| `output_format` | jpeg | jpeg / png |
-| `temp_file_policy` | keep | keep / delete / delete_after_24h |
+
+## 不重复付费
+
+模型调用工具是「自己决定」的，同一张图很容易被连着调好几次（每次都完整重跑一遍
+逐片识图）。插件从两个方向挡住重复计费：
+
+- **同一条消息内**：第一次识别完就在事件上打标记，再调直接返回
+  「这张长图在本条消息里已经识别过」，不再产生任何模型调用。
+- **跨消息**：按「会话 + 图片内容哈希 + focus」缓存识别结果，最多 32 张。
+  用户隔几分钟再发同一张图，或模型在新一轮里又调一次，直接复用上次结果。
+
+缓存只存文字结果，不占多少内存；进程重启后失效。
+
+## 临时文件目录
+
+切片写到 **AstrBot 的 data 目录**下的 `temp/long_image/<日期>/<会话摘要>_<时间戳>/`，
+位置取自配置文件 `cmd_config.json` 所在目录，与启动时的工作目录无关。
+
+早期版本用 `get_astrbot_temp_path()`，那个函数跟随进程 cwd，从别处启动 AstrBot 时
+会把切片写到 `gsuid_core/data/temp/long_image` 之类的错误位置。
 
 ## 已知限制
 

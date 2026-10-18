@@ -13,6 +13,7 @@ import hashlib
 import os
 import shutil
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import mcp.types
@@ -30,6 +31,8 @@ MIN_MAX_SIZE = 256
 UNIFORM_SPREAD = 2
 SCAN_PIXEL_BUDGET = 2_000_000
 TEMP_SUBDIR = "long_image"
+DONE_EXTRA_KEY = "long_image_reader_done"
+CACHE_MAX_ENTRIES = 32
 
 DEFAULT_SLICE_PROMPT = (
     "这是一张超长图片按从上到下顺序切分后的第 {index}/{total} 片。"
@@ -48,6 +51,48 @@ DEFAULT_SUMMARY_PROMPT = (
     "保留关键文字、数字、时间、名称与结构；无法辨认处标注「无法辨认」。"
     "合并时优先保留用户消息里明确关心的内容。"
 )
+
+
+@dataclass
+class _Transcript:
+    """一张长图逐片识别后的合并文本，缓存复用以避免重复计费。"""
+
+    width: int
+    height: int
+    slices: int
+    merged: str
+
+
+class _TranscriptCache:
+    def __init__(self, capacity: int = CACHE_MAX_ENTRIES) -> None:
+        self._capacity = max(1, capacity)
+        self._items: dict[str, _Transcript] = {}
+
+    def get(self, key: str) -> _Transcript | None:
+        if key not in self._items:
+            return None
+        item = self._items.pop(key)
+        self._items[key] = item
+        return item
+
+    def put(self, key: str, item: _Transcript) -> None:
+        if key in self._items:
+            self._items.pop(key)
+        self._items[key] = item
+        while len(self._items) > self._capacity:
+            self._items.pop(next(iter(self._items)))
+
+
+def _file_digest(path: str) -> str:
+    digest = hashlib.sha1()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:  # 原图可能已被平台清理，取不到哈希就跳过缓存
+        logger.debug(f"[long_image_reader] 计算图片哈希失败：{path} / {exc}")
+        return ""
+    return digest.hexdigest()
 
 
 def _probe_size(path: str) -> tuple[int, int] | None:
@@ -180,12 +225,20 @@ def _write_slices(
     "astrbot_plugin_long_image_reader",
     "APHu19",
     "把超长图片按纯色/边框行切成清晰片段，交给识图模型逐片转文字后回传结果，绕开图片压缩导致的细节丢失。",
-    "1.1.0",
+    "1.2.0",
 )
 class LongImageReader(Star):
+    _cache: _TranscriptCache | None = None
+
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
         self.config = config
+        self._cache = _TranscriptCache()
+
+    def _transcripts(self) -> _TranscriptCache:
+        if self._cache is None:
+            self._cache = _TranscriptCache()
+        return self._cache
 
     # ---------- 配置读取 ----------
 
@@ -260,8 +313,17 @@ class LongImageReader(Star):
 
     # ---------- 临时目录 ----------
 
+    def _data_root(self) -> Path:
+        # get_astrbot_temp_path() 跟着进程 cwd 走，换个工作目录就会写到别处；
+        # 配置文件路径才是 AstrBot 真正的 data 目录。
+        config = self.context.get_config()
+        config_path = config.config_path if isinstance(config, AstrBotConfig) else ""
+        if isinstance(config_path, str) and config_path:
+            return Path(config_path).resolve().parent
+        return Path(get_astrbot_temp_path()).resolve().parent
+
     def _temp_root(self) -> Path:
-        return Path(get_astrbot_temp_path()) / TEMP_SUBDIR
+        return self._data_root() / "temp" / TEMP_SUBDIR
 
     def _sweep_expired(self) -> None:
         root = self._temp_root()
@@ -427,6 +489,27 @@ class LongImageReader(Star):
         partials = [await ask(chunk, index) for index, chunk in enumerate(chunks, start=1)]
         return await ask("\n\n".join(partials), len(chunks) + 1)
 
+    # ---------- 去重 ----------
+
+    @staticmethod
+    def _already_done(event: AstrMessageEvent, image_index: int) -> bool:
+        done = event.get_extra(DONE_EXTRA_KEY)
+        return isinstance(done, dict) and done.get(image_index) is True
+
+    @staticmethod
+    def _mark_done(event: AstrMessageEvent, image_index: int) -> None:
+        done = event.get_extra(DONE_EXTRA_KEY)
+        record = dict(done) if isinstance(done, dict) else {}
+        record[image_index] = True
+        event.set_extra(DONE_EXTRA_KEY, record)
+
+    def _cache_key(self, event: AstrMessageEvent, source: str, focus: str) -> str:
+        digest = _file_digest(source)
+        if not digest:
+            return ""
+        scope = hashlib.sha1(event.unified_msg_origin.encode("utf-8")).hexdigest()[:8]
+        return f"{scope}:{digest}:{focus.strip()}"
+
     # ---------- 工具 ----------
 
     @filter.llm_tool(name="read_long_image")
@@ -471,6 +554,17 @@ class LongImageReader(Star):
             )
 
         horizontal = width > height
+        cache_key = await asyncio.to_thread(self._cache_key, event, source, focus)
+        if cache_key:
+            cached = self._transcripts().get(cache_key)
+            if cached is not None:
+                return (
+                    f"这张 {cached.width}×{cached.height} 的长图已经识别过（{cached.slices} 片），"
+                    f"直接复用上次结果：\n\n{cached.merged}"
+                )
+        if self._already_done(event, image_index):
+            return "这张长图在本条消息里已经识别过，结果在上一条工具返回里，直接使用即可。"
+
         work = await asyncio.to_thread(_prepare_work_image, source, max_side, horizontal)
         gray = work.convert("L")
         scores = await asyncio.to_thread(_row_stddev, gray, self._cfg_int("max_scan_width", 256))
@@ -502,6 +596,12 @@ class LongImageReader(Star):
             self._finalize_temp(out_dir)
             if not described:
                 return result_text
+            self._mark_done(event, image_index)
+            if cache_key:
+                self._transcripts().put(
+                    cache_key,
+                    _Transcript(width=width, height=height, slices=total, merged=result_text),
+                )
             return (
                 f"已把这张 {width}×{height} 的{orientation}长图切成 {total} 片并逐片识别，"
                 f"以下是合并后的识图结果：\n\n{result_text}"
@@ -538,6 +638,7 @@ class LongImageReader(Star):
             payload = base64.b64encode(await asyncio.to_thread(path.read_bytes)).decode("ascii")
             contents.append(mcp.types.ImageContent(type="image", data=payload, mimeType=mime))
         self._finalize_temp(out_dir)
+        self._mark_done(event, image_index)
         return mcp.types.CallToolResult(content=list(contents))
 
     # ---------- 提示注入 ----------
